@@ -144,8 +144,9 @@ class App:
 
         self.client          = None
         self.is_monitoring   = False
+        self.is_scanning     = False
         self._keywords: list = []
-        self.matched_users: list = []   # [{id, name, username, chat}]
+        self.matched_users: list = []   # [{id, name, username, chat, message, date, selected}]
         self._active_handler = None
         self._ui_queue: list = []
 
@@ -282,17 +283,39 @@ class App:
         kw_entry.pack(side=tk.LEFT, padx=8)
         _bind_edit_menu(self.root, kw_entry)
 
+        hf = ttk.LabelFrame(parent, text="Поиск по истории", padding=10)
+        hf.pack(fill=tk.X, padx=16, pady=4)
+        self.scan_history_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            hf,
+            text="Искать в старых сообщениях (вся доступная история чатов)",
+            variable=self.scan_history_var,
+        ).pack(anchor=tk.W)
+        limit_row = ttk.Frame(hf)
+        limit_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(limit_row, text="Лимит сообщений на чат (0 = без лимита):").pack(side=tk.LEFT)
+        self.history_limit_var = tk.StringVar(value="0")
+        limit_entry = ttk.Entry(limit_row, textvariable=self.history_limit_var, width=8)
+        limit_entry.pack(side=tk.LEFT, padx=8)
+        _bind_edit_menu(self.root, limit_entry)
+
         bf = ttk.Frame(parent); bf.pack(pady=4)
         self.start_btn = ttk.Button(bf, text="▶  Начать мониторинг",
                                      command=self._start_monitoring, state=tk.DISABLED)
         self.start_btn.pack(side=tk.LEFT, padx=5)
+        self.scan_btn = ttk.Button(bf, text="🔍  Сканировать историю",
+                                   command=self._start_history_scan, state=tk.DISABLED)
+        self.scan_btn.pack(side=tk.LEFT, padx=5)
         self.stop_btn = ttk.Button(bf, text="⏹  Остановить",
                                     command=self._stop_monitoring, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
         ttk.Button(bf, text="Очистить список",
                    command=self._clear_results).pack(side=tk.LEFT, padx=5)
 
-        rf = ttk.LabelFrame(parent, text="Результаты (в реальном времени)", padding=8)
+        self.scan_progress_var = tk.StringVar(value="")
+        ttk.Label(parent, textvariable=self.scan_progress_var, foreground="#555555").pack(pady=(0, 2))
+
+        rf = ttk.LabelFrame(parent, text="Результаты (новые + история)", padding=8)
         rf.pack(fill=tk.BOTH, expand=True, padx=16, pady=6)
         self.results_text = scrolledtext.ScrolledText(
             rf, state=tk.DISABLED, wrap=tk.WORD, font=("Consolas", 9))
@@ -303,9 +326,50 @@ class App:
         ttk.Label(parent, textvariable=self.matched_count_var).pack(pady=3)
 
     def _build_mail_tab(self, parent):
+        lf = ttk.LabelFrame(parent, text="Лиды — выберите кому отправить", padding=8)
+        lf.pack(fill=tk.BOTH, expand=True, padx=16, pady=(10, 4))
+
+        filter_row = ttk.Frame(lf)
+        filter_row.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(filter_row, text="Фильтр:").pack(side=tk.LEFT)
+        self.lead_filter_var = tk.StringVar()
+        filter_entry = ttk.Entry(filter_row, textvariable=self.lead_filter_var, width=40)
+        filter_entry.pack(side=tk.LEFT, padx=8)
+        _bind_edit_menu(self.root, filter_entry)
+        self.lead_filter_var.trace_add("write", lambda *_: self._refresh_leads_list())
+
+        sel_row = ttk.Frame(lf)
+        sel_row.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(sel_row, text="Выбрать все", command=lambda: self._select_all_leads(True)).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(sel_row, text="Снять выбор", command=lambda: self._select_all_leads(False)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(sel_row, text="Инвертировать", command=self._invert_lead_selection).pack(side=tk.LEFT, padx=4)
+        ttk.Label(sel_row, text="  (клик по строке — переключить выбор)", foreground="#666666").pack(side=tk.LEFT, padx=8)
+
+        tree_wrap = ttk.Frame(lf)
+        tree_wrap.pack(fill=tk.BOTH, expand=True)
+        cols = ("name", "username", "chat", "message", "date")
+        self.leads_tree = ttk.Treeview(tree_wrap, columns=cols, show="tree headings", height=8)
+        self.leads_tree.heading("#0", text="✓")
+        self.leads_tree.column("#0", width=32, stretch=False)
+        self.leads_tree.heading("name", text="Имя")
+        self.leads_tree.heading("username", text="Username")
+        self.leads_tree.heading("chat", text="Чат")
+        self.leads_tree.heading("message", text="Сообщение")
+        self.leads_tree.heading("date", text="Дата")
+        self.leads_tree.column("name", width=120)
+        self.leads_tree.column("username", width=90)
+        self.leads_tree.column("chat", width=120)
+        self.leads_tree.column("message", width=220)
+        self.leads_tree.column("date", width=120)
+        tree_scroll = ttk.Scrollbar(tree_wrap, orient=tk.VERTICAL, command=self.leads_tree.yview)
+        self.leads_tree.configure(yscrollcommand=tree_scroll.set)
+        self.leads_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.leads_tree.bind("<Button-1>", self._toggle_lead_selection)
+
         mf = ttk.LabelFrame(parent, text="Текст сообщения для рассылки", padding=10)
-        mf.pack(fill=tk.X, padx=16, pady=10)
-        self.mail_text = scrolledtext.ScrolledText(mf, height=7, wrap=tk.WORD)
+        mf.pack(fill=tk.X, padx=16, pady=6)
+        self.mail_text = scrolledtext.ScrolledText(mf, height=5, wrap=tk.WORD)
         self.mail_text.pack(fill=tk.X)
         _bind_edit_menu(self.root, self.mail_text, is_text=True)
 
@@ -318,11 +382,11 @@ class App:
 
         self.send_btn = ttk.Button(
             parent,
-            text="Отправить всем найденным пользователям",
+            text="Отправить выбранным (0/0)",
             command=self._start_mailing,
             state=tk.DISABLED
         )
-        self.send_btn.pack(pady=8)
+        self.send_btn.pack(pady=6)
 
         lf = ttk.LabelFrame(parent, text="Лог рассылки", padding=8)
         lf.pack(fill=tk.BOTH, expand=True, padx=16, pady=6)
@@ -492,6 +556,7 @@ class App:
         self.connect_btn.config(state=tk.DISABLED)
         self.disconnect_btn.config(state=tk.NORMAL)
         self.start_btn.config(state=tk.NORMAL)
+        self.scan_btn.config(state=tk.NORMAL)
         self.send_btn.config(state=tk.NORMAL)
 
     def _disconnect(self):
@@ -503,14 +568,92 @@ class App:
         self.connect_btn.config(state=tk.NORMAL)
         self.disconnect_btn.config(state=tk.DISABLED)
         self.start_btn.config(state=tk.DISABLED)
+        self.scan_btn.config(state=tk.DISABLED)
         self.send_btn.config(state=tk.DISABLED)
 
     # ── Monitoring ────────────────────────────────────────────────────────────
 
-    def _start_monitoring(self):
+    def _parse_keywords(self) -> list | None:
         kws = [" ".join(k.split()).lower() for k in self.keywords_var.get().split(",") if k.strip()]
         if not kws:
             messagebox.showerror("Ошибка", "Введите ключевые слова!")
+            return None
+        return kws
+
+    def _history_limit(self):
+        try:
+            val = int(self.history_limit_var.get().strip())
+            return None if val <= 0 else val
+        except ValueError:
+            return None
+
+    def _text_matches(self, raw: str) -> str | None:
+        text = " ".join((raw or "").split()).lower()
+        if not text or not any(kw in text for kw in self._keywords):
+            return None
+        return text
+
+    def _format_match_line(self, prefix: str, c_name: str, s_name: str, sender, text: str) -> str:
+        uname = f"@{sender.username}" if getattr(sender, "username", None) else "нет username"
+        return f"[{prefix}]  Чат: {c_name}  |  От: {s_name}  |  Username: {uname}  |  {text}\n"
+
+    def _register_match(self, sender, chat, text: str, msg_date=None, *, source: str = "live"):
+        if not hasattr(sender, "id") or not sender.id:
+            return
+
+        s_name = _entity_name(sender)
+        c_name = _chat_title(chat)
+        if msg_date:
+            prefix = msg_date.strftime("%Y-%m-%d %H:%M") if hasattr(msg_date, "strftime") else str(msg_date)
+            if source == "history":
+                prefix = f"История {prefix}"
+        else:
+            prefix = datetime.now().strftime("%H:%M:%S")
+            if source == "live":
+                pass
+            elif source == "history":
+                prefix = f"История {prefix}"
+
+        entry = {
+            "id":       sender.id,
+            "name":     s_name,
+            "username": getattr(sender, "username", None),
+            "chat":     c_name,
+            "message":  text[:300],
+            "date":     prefix,
+            "selected": True,
+        }
+
+        existing = next((u for u in self.matched_users if u["id"] == sender.id), None)
+        if existing:
+            existing["chat"] = c_name
+            existing["message"] = text[:300]
+            existing["date"] = prefix
+        else:
+            self.matched_users.append(entry)
+
+        line = self._format_match_line(prefix, c_name, s_name, sender, text)
+        with open(RESULTS_FILE, "a", encoding="utf-8") as fh:
+            fh.write(line)
+
+        self._ui(lambda l=line: self._add_result(l))
+        self._ui(self._update_count)
+
+    def _start_history_scan(self):
+        kws = self._parse_keywords()
+        if not kws:
+            return
+        self._keywords = kws
+        self.is_scanning = True
+        self.scan_btn.config(state=tk.DISABLED)
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self._set_status(f"Сканирование истории  |  слова: {', '.join(kws)}")
+        self._run_async(self._async_scan_history())
+
+    def _start_monitoring(self):
+        kws = self._parse_keywords()
+        if not kws:
             return
         self._keywords = kws
         self.is_monitoring = True
@@ -518,6 +661,67 @@ class App:
         self.stop_btn.config(state=tk.NORMAL)
         self._set_status(f"Мониторинг активен  |  слова: {', '.join(kws)}")
         self._run_async(self._async_add_handler())
+        if self.scan_history_var.get():
+            self.is_scanning = True
+            self.scan_btn.config(state=tk.DISABLED)
+            self._run_async(self._async_scan_history())
+
+    async def _async_scan_history(self):
+        try:
+            dialogs = await self.client.get_dialogs()
+            total = len(dialogs)
+            limit = self._history_limit()
+            found = 0
+
+            for idx, dialog in enumerate(dialogs, 1):
+                if not self.is_scanning:
+                    break
+
+                chat = dialog.entity
+                c_name = _chat_title(chat)
+                status = f"Сканирование [{idx}/{total}]: {c_name}"
+                self._ui(lambda s=status: self.scan_progress_var.set(s))
+                self._ui(lambda s=status: self._set_status(s))
+
+                try:
+                    async for message in self.client.iter_messages(chat, limit=limit):
+                        if not self.is_scanning:
+                            break
+                        matched = self._text_matches(message.text or message.message or "")
+                        if not matched:
+                            continue
+                        try:
+                            sender = await message.get_sender()
+                            if sender is None:
+                                continue
+                            self._register_match(sender, chat, matched, message.date, source="history")
+                            found += 1
+                        except Exception as ex:
+                            err = f"[Ошибка истории в «{c_name}»: {ex}]\n"
+                            self._ui(lambda e=err: self._add_result(e))
+                except Exception as ex:
+                    err = f"[Не удалось прочитать «{c_name}»: {ex}]\n"
+                    self._ui(lambda e=err: self._add_result(e))
+
+            done = f"Сканирование завершено. Совпадений: {found}, чатов: {total}"
+            self._ui(lambda d=done: self.scan_progress_var.set(d))
+            if self.is_monitoring:
+                self._ui(lambda: self._set_status(
+                    f"Мониторинг активен  |  слова: {', '.join(self._keywords)}"
+                ))
+            else:
+                self._ui(lambda d=done: self._set_status(d))
+        finally:
+            self.is_scanning = False
+            self._ui(self._on_scan_finished)
+
+    def _on_scan_finished(self):
+        if self.client and not self.is_monitoring:
+            self.start_btn.config(state=tk.NORMAL)
+            self.scan_btn.config(state=tk.NORMAL)
+            self.stop_btn.config(state=tk.DISABLED)
+        elif self.client:
+            self.scan_btn.config(state=tk.NORMAL)
 
     async def _async_add_handler(self):
         from telethon import events
@@ -525,36 +729,13 @@ class App:
         async def on_message(event):
             if not self.is_monitoring:
                 return
-            raw  = event.message.text or event.message.message or ""
-            text = " ".join(raw.split()).lower()   # нормализуем все виды пробелов
-            if not any(kw in text for kw in self._keywords):
+            matched = self._text_matches(event.message.text or event.message.message or "")
+            if not matched:
                 return
             try:
                 sender = await event.get_sender()
                 chat   = await event.get_chat()
-                s_name = _entity_name(sender)
-                c_name = _chat_title(chat)
-
-                if hasattr(sender, "id") and sender.id:
-                    entry = {
-                        "id":       sender.id,
-                        "name":     s_name,
-                        "username": getattr(sender, "username", None),
-                        "chat":     c_name,
-                    }
-                    if not any(u["id"] == sender.id for u in self.matched_users):
-                        self.matched_users.append(entry)
-
-                ts       = datetime.now().strftime("%H:%M:%S")
-                uname    = f"@{sender.username}" if getattr(sender, "username", None) else "нет username"
-                line = f"[{ts}]  Чат: {c_name}  |  От: {s_name}  |  Username: {uname}  |  {text}\n"
-
-                with open(RESULTS_FILE, "a", encoding="utf-8") as fh:
-                    fh.write(line)
-
-                self._ui(lambda l=line: self._add_result(l))
-                self._ui(self._update_count)
-
+                self._register_match(sender, chat, matched, source="live")
             except Exception as ex:
                 self._ui(lambda e=ex: self._add_result(f"[Ошибка обработки: {e}]\n"))
 
@@ -562,16 +743,22 @@ class App:
         self.client.add_event_handler(on_message, events.NewMessage)
 
     def _stop_monitoring(self):
+        was_active = self.is_monitoring or self.is_scanning
         self.is_monitoring = False
+        self.is_scanning = False
         if self.client and self._active_handler:
             handler = self._active_handler
             self._run_async(self._async_remove_handler(handler))
         self._active_handler = None
         self.stop_btn.config(state=tk.DISABLED)
-        self._save_summary()
+        if was_active:
+            self._save_summary()
         if self.client:
             self.start_btn.config(state=tk.NORMAL)
-            self._set_status("Мониторинг остановлен")
+            self.scan_btn.config(state=tk.NORMAL)
+            if was_active:
+                self._set_status("Остановлено")
+            self.scan_progress_var.set("")
 
     def _save_summary(self):
         if not self.matched_users:
@@ -586,7 +773,8 @@ class App:
         ]
         for i, u in enumerate(self.matched_users, 1):
             uname = f"@{u['username']}" if u["username"] else "нет username"
-            lines.append(f"  {i}. {u['name']}  |  {uname}  |  Чат: {u['chat']}")
+            msg = (u.get("message") or "")[:60]
+            lines.append(f"  {i}. {u['name']}  |  {uname}  |  Чат: {u['chat']}  |  {msg}")
         lines.append(sep + "\n")
         with open(RESULTS_FILE, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines))
@@ -604,6 +792,7 @@ class App:
         self.matched_count_var.set(
             f"Найдено уникальных пользователей: {len(self.matched_users)}"
         )
+        self._refresh_leads_list()
 
     def _clear_results(self):
         self.results_text.config(state=tk.NORMAL)
@@ -612,12 +801,90 @@ class App:
         self.matched_users.clear()
         self._update_count()
 
+    def _lead_filter_text(self) -> str:
+        return self.lead_filter_var.get().strip().lower() if hasattr(self, "lead_filter_var") else ""
+
+    def _lead_matches_filter(self, user: dict) -> bool:
+        needle = self._lead_filter_text()
+        if not needle:
+            return True
+        haystack = " ".join([
+            user.get("name", ""),
+            user.get("username") or "",
+            user.get("chat", ""),
+            user.get("message", ""),
+            user.get("date", ""),
+        ]).lower()
+        return needle in haystack
+
+    def _refresh_leads_list(self):
+        if not hasattr(self, "leads_tree"):
+            return
+        for item in self.leads_tree.get_children():
+            self.leads_tree.delete(item)
+        for user in self.matched_users:
+            if not self._lead_matches_filter(user):
+                continue
+            mark = "☑" if user.get("selected", True) else "☐"
+            uname = f"@{user['username']}" if user.get("username") else "—"
+            msg = (user.get("message") or "")[:80]
+            self.leads_tree.insert(
+                "", tk.END,
+                iid=str(user["id"]),
+                text=mark,
+                values=(user["name"], uname, user.get("chat", ""), msg, user.get("date", "")),
+            )
+        self._update_mail_selection_count()
+
+    def _toggle_lead_selection(self, event):
+        region = self.leads_tree.identify_region(event.x, event.y)
+        if region not in ("tree", "cell"):
+            return
+        item = self.leads_tree.identify_row(event.y)
+        if not item:
+            return
+        uid = int(item)
+        for user in self.matched_users:
+            if user["id"] == uid:
+                user["selected"] = not user.get("selected", True)
+                break
+        self._refresh_leads_list()
+
+    def _select_all_leads(self, selected: bool):
+        needle = self._lead_filter_text()
+        for user in self.matched_users:
+            if needle and not self._lead_matches_filter(user):
+                continue
+            user["selected"] = selected
+        self._refresh_leads_list()
+
+    def _invert_lead_selection(self):
+        needle = self._lead_filter_text()
+        for user in self.matched_users:
+            if needle and not self._lead_matches_filter(user):
+                continue
+            user["selected"] = not user.get("selected", True)
+        self._refresh_leads_list()
+
+    def _get_selected_users(self) -> list:
+        return [u for u in self.matched_users if u.get("selected", True)]
+
+    def _update_mail_selection_count(self):
+        if not hasattr(self, "send_btn"):
+            return
+        selected = len(self._get_selected_users())
+        total = len(self.matched_users)
+        self.send_btn.config(text=f"Отправить выбранным ({selected}/{total})")
+
     # ── Mailing ───────────────────────────────────────────────────────────────
 
     def _start_mailing(self):
-        if not self.matched_users:
-            messagebox.showinfo("Рассылка",
-                "Список пуст. Сначала запустите мониторинг и дождитесь совпадений.")
+        recipients = self._get_selected_users()
+        if not recipients:
+            messagebox.showinfo(
+                "Рассылка",
+                "Никто не выбран. Отметьте лидов на вкладке «Рассылка» или запустите поиск."
+            )
             return
         msg = self.mail_text.get(1.0, tk.END).strip()
         if not msg:
@@ -628,19 +895,25 @@ class App:
         except ValueError:
             delay = 3.0
         preview = msg[:80] + ("…" if len(msg) > 80 else "")
+        names_preview = "\n".join(
+            f"  • {u['name']} ({u.get('chat', '')})" for u in recipients[:8]
+        )
+        if len(recipients) > 8:
+            names_preview += f"\n  … и ещё {len(recipients) - 8}"
         if not messagebox.askyesno(
             "Подтверждение",
-            f"Отправить сообщение {len(self.matched_users)} пользователям?\n\n«{preview}»"
+            f"Отправить сообщение {len(recipients)} выбранным пользователям?\n\n"
+            f"«{preview}»\n\n{names_preview}"
         ):
             return
         self.send_btn.config(state=tk.DISABLED)
-        self._run_async(self._async_mailing(msg, delay))
+        self._run_async(self._async_mailing(msg, delay, recipients))
 
-    async def _async_mailing(self, message: str, delay: float):
+    async def _async_mailing(self, message: str, delay: float, recipients: list):
         import asyncio as aio
-        total   = len(self.matched_users)
+        total   = len(recipients)
         success = 0
-        for i, user in enumerate(self.matched_users, 1):
+        for i, user in enumerate(recipients, 1):
             try:
                 await self.client.send_message(user["id"], message)
                 log = f"[{i}/{total}] ✓  {user['name']}\n"

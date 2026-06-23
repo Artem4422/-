@@ -40,13 +40,15 @@ echo "--- Сборка .app ---"
 pyinstaller \
     --windowed \
     --name "TelegramParser" \
-    --add-data "config.json:." \
+    --add-data "config.json.example:." \
     main.py
 
 echo ""
 echo "=== Готово ==="
 echo ""
 echo "Приложение: dist/TelegramParser.app"
+cp config.json.example dist/config.json.example
+echo "Пример настроек: dist/config.json.example"
 echo ""
 echo "Чтобы упаковать для передачи:"
-echo "  cd dist && zip -r TelegramParser-mac.zip TelegramParser.app"
+echo "  cd dist && zip -r TelegramParser-mac.zip TelegramParser.app config.json.example"
