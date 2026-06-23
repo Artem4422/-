@@ -1,11 +1,14 @@
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 import asyncio
 import threading
 import json
 import os
+import re
 import sys
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime
 
 # Когда собрано PyInstaller-ом — файлы кладём рядом с .exe, не во временную папку
@@ -39,6 +42,117 @@ def _chat_title(c):
     return (getattr(c, 'title', None)
             or getattr(c, 'first_name', None)
             or str(getattr(c, 'id', '?')))
+
+
+def _normalize_username(value: str) -> str:
+    value = (value or "").strip()
+    if value.startswith("@"):
+        value = value[1:]
+    value = value.split()[0] if value else ""
+    if not value or value.lower() in {"нет username", "-", "—"}:
+        return ""
+    return value
+
+
+def _col_letters(cell_ref: str) -> str:
+    m = re.match(r"([A-Z]+)", cell_ref or "")
+    return m.group(1) if m else ""
+
+
+def _col_index(col: str) -> int:
+    idx = 0
+    for ch in col:
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
+def _index_to_col(idx: int) -> str:
+    idx += 1
+    out = ""
+    while idx:
+        idx, rem = divmod(idx - 1, 26)
+        out = chr(rem + ord("A")) + out
+    return out
+
+
+def _read_xlsx_sheet(path: str) -> dict[tuple[int, int], str]:
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    shared: list[str] = []
+    cells: dict[tuple[int, int], str] = {}
+
+    with zipfile.ZipFile(path) as zf:
+        if "xl/sharedStrings.xml" in zf.namelist():
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root.findall(".//m:si", ns):
+                parts = [t.text or "" for t in si.findall(".//m:t", ns)]
+                shared.append("".join(parts))
+
+        sheet_name = next((n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")), None)
+        if not sheet_name:
+            raise ValueError("В файле Excel не найден лист")
+
+        sheet = ET.fromstring(zf.read(sheet_name))
+        for row in sheet.findall(".//m:sheetData/m:row", ns):
+            row_idx = int(row.get("r", "0")) - 1
+            for cell in row.findall("m:c", ns):
+                ref = cell.get("r", "")
+                col = _col_letters(ref)
+                if not col:
+                    continue
+                col_idx = _col_index(col)
+                val_node = cell.find("m:v", ns)
+                if val_node is None or val_node.text is None:
+                    continue
+                val = val_node.text
+                if cell.get("t") == "s":
+                    val = shared[int(val)]
+                cells[(row_idx, col_idx)] = str(val).strip()
+    return cells
+
+
+def parse_leads_xlsx(path: str) -> list[dict]:
+    """Парсит Excel в формате: строка 1 — «Ключ», строка 2 — категории, далее @username + описание."""
+    cells = _read_xlsx_sheet(path)
+    if not cells:
+        return []
+
+    header_row = 1
+    categories: list[tuple[int, str]] = []
+    max_col = max(c for _, c in cells)
+    for col in range(max_col + 1):
+        title = cells.get((header_row, col), "")
+        if title:
+            categories.append((col, title))
+
+    if not categories:
+        raise ValueError("Не найдена строка категорий (ожидается вторая строка файла)")
+
+    leads: list[dict] = []
+    seen: set[str] = set()
+    max_row = max(r for r, _ in cells)
+
+    for row in range(header_row + 1, max_row + 1):
+        for col, category in categories:
+            username_raw = cells.get((row, col), "")
+            if not username_raw:
+                continue
+            username = _normalize_username(username_raw)
+            if not username:
+                continue
+            key = username.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            description = cells.get((row, col + 1), "")
+            leads.append({
+                "username": username,
+                "name": f"@{username}",
+                "chat": category,
+                "message": description[:300],
+                "source": "import",
+            })
+    return leads
 
 
 def _edit_copy(widget, is_text: bool, root: tk.Tk):
@@ -326,6 +440,23 @@ class App:
         ttk.Label(parent, textvariable=self.matched_count_var).pack(pady=3)
 
     def _build_mail_tab(self, parent):
+        imp = ttk.LabelFrame(parent, text="Импорт и ручной ввод username", padding=8)
+        imp.pack(fill=tk.X, padx=16, pady=(10, 4))
+        ttk.Label(
+            imp,
+            text="Username по одному на строку (можно с @). Формат Excel: «Ключ» → категории → @username + описание.",
+            wraplength=880,
+        ).pack(anchor=tk.W, pady=(0, 6))
+        self.manual_usernames_text = scrolledtext.ScrolledText(imp, height=4, wrap=tk.WORD)
+        self.manual_usernames_text.pack(fill=tk.X)
+        _bind_edit_menu(self.root, self.manual_usernames_text, is_text=True)
+
+        imp_btns = ttk.Frame(imp)
+        imp_btns.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(imp_btns, text="Добавить вручную", command=self._add_manual_usernames).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(imp_btns, text="Импорт Excel (.xlsx)", command=self._import_leads_xlsx).pack(side=tk.LEFT, padx=4)
+        ttk.Button(imp_btns, text="Удалить импорт/ручные", command=self._remove_imported_leads).pack(side=tk.LEFT, padx=4)
+
         lf = ttk.LabelFrame(parent, text="Лиды — выберите кому отправить", padding=8)
         lf.pack(fill=tk.BOTH, expand=True, padx=16, pady=(10, 4))
 
@@ -347,20 +478,22 @@ class App:
 
         tree_wrap = ttk.Frame(lf)
         tree_wrap.pack(fill=tk.BOTH, expand=True)
-        cols = ("name", "username", "chat", "message", "date")
+        cols = ("name", "username", "chat", "message", "date", "source")
         self.leads_tree = ttk.Treeview(tree_wrap, columns=cols, show="tree headings", height=8)
         self.leads_tree.heading("#0", text="✓")
         self.leads_tree.column("#0", width=32, stretch=False)
         self.leads_tree.heading("name", text="Имя")
         self.leads_tree.heading("username", text="Username")
-        self.leads_tree.heading("chat", text="Чат")
-        self.leads_tree.heading("message", text="Сообщение")
+        self.leads_tree.heading("chat", text="Ключ/Чат")
+        self.leads_tree.heading("message", text="Описание")
         self.leads_tree.heading("date", text="Дата")
-        self.leads_tree.column("name", width=120)
+        self.leads_tree.heading("source", text="Источник")
+        self.leads_tree.column("name", width=110)
         self.leads_tree.column("username", width=90)
-        self.leads_tree.column("chat", width=120)
-        self.leads_tree.column("message", width=220)
-        self.leads_tree.column("date", width=120)
+        self.leads_tree.column("chat", width=90)
+        self.leads_tree.column("message", width=180)
+        self.leads_tree.column("date", width=90)
+        self.leads_tree.column("source", width=80)
         tree_scroll = ttk.Scrollbar(tree_wrap, orient=tk.VERTICAL, command=self.leads_tree.yview)
         self.leads_tree.configure(yscrollcommand=tree_scroll.set)
         self.leads_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -615,6 +748,7 @@ class App:
                 prefix = f"История {prefix}"
 
         entry = {
+            "_key":     f"tg_{sender.id}",
             "id":       sender.id,
             "name":     s_name,
             "username": getattr(sender, "username", None),
@@ -622,9 +756,10 @@ class App:
             "message":  text[:300],
             "date":     prefix,
             "selected": True,
+            "source":   "парсер",
         }
 
-        existing = next((u for u in self.matched_users if u["id"] == sender.id), None)
+        existing = next((u for u in self.matched_users if u.get("_key") == entry["_key"]), None)
         if existing:
             existing["chat"] = c_name
             existing["message"] = text[:300]
@@ -801,6 +936,143 @@ class App:
         self.matched_users.clear()
         self._update_count()
 
+    def _lead_source_label(self, user: dict) -> str:
+        source = user.get("source", "парсер")
+        labels = {"import": "Excel", "manual": "Вручную", "парсер": "Парсер"}
+        return labels.get(source, source)
+
+    def _lead_key(self, user: dict) -> str:
+        if user.get("_key"):
+            return user["_key"]
+        if user.get("id"):
+            user["_key"] = f"tg_{user['id']}"
+        elif user.get("username"):
+            user["_key"] = f"u_{_normalize_username(user['username']).lower()}"
+        else:
+            user["_key"] = f"row_{id(user)}"
+        return user["_key"]
+
+    def _make_lead_entry(
+        self,
+        *,
+        username: str,
+        name: str = "",
+        chat: str = "",
+        message: str = "",
+        source: str = "manual",
+        user_id=None,
+    ) -> dict | None:
+        username = _normalize_username(username)
+        if not username:
+            return None
+        return {
+            "_key": f"tg_{user_id}" if user_id else f"u_{username.lower()}",
+            "id": user_id,
+            "name": name or f"@{username}",
+            "username": username,
+            "chat": chat or ("Ручной ввод" if source == "manual" else "Импорт Excel"),
+            "message": (message or "")[:300],
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "selected": True,
+            "source": source,
+        }
+
+    def _parse_manual_usernames(self, text: str) -> list[str]:
+        found: list[str] = []
+        seen: set[str] = set()
+        for line in text.splitlines():
+            chunk = line.replace(";", ",")
+            for part in chunk.split(","):
+                username = _normalize_username(part)
+                if not username:
+                    continue
+                key = username.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(username)
+        return found
+
+    def _upsert_leads(self, leads: list[dict]) -> tuple[int, int]:
+        added = 0
+        updated = 0
+        for raw in leads:
+            entry = self._make_lead_entry(
+                username=raw.get("username", ""),
+                name=raw.get("name", ""),
+                chat=raw.get("chat", ""),
+                message=raw.get("message", ""),
+                source=raw.get("source", "manual"),
+                user_id=raw.get("id"),
+            )
+            if not entry:
+                continue
+            existing = next((u for u in self.matched_users if u.get("_key") == entry["_key"]), None)
+            if existing:
+                existing.update({
+                    "name": entry["name"],
+                    "chat": entry["chat"],
+                    "message": entry["message"],
+                    "date": entry["date"],
+                    "source": entry["source"],
+                    "username": entry["username"],
+                })
+                updated += 1
+            else:
+                self.matched_users.append(entry)
+                added += 1
+        self._update_count()
+        return added, updated
+
+    def _add_manual_usernames(self):
+        text = self.manual_usernames_text.get(1.0, tk.END)
+        usernames = self._parse_manual_usernames(text)
+        if not usernames:
+            messagebox.showinfo("Ручной ввод", "Введите хотя бы один username.")
+            return
+        leads = [{"username": u, "source": "manual"} for u in usernames]
+        added, updated = self._upsert_leads(leads)
+        self.manual_usernames_text.delete(1.0, tk.END)
+        messagebox.showinfo(
+            "Ручной ввод",
+            f"Добавлено: {added}\nОбновлено: {updated}\nВсего в списке: {len(self.matched_users)}"
+        )
+
+    def _import_leads_xlsx(self):
+        path = filedialog.askopenfilename(
+            title="Импорт базы Excel",
+            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            leads = parse_leads_xlsx(path)
+        except Exception as ex:
+            messagebox.showerror("Импорт Excel", f"Не удалось прочитать файл:\n{ex}")
+            return
+        if not leads:
+            messagebox.showinfo("Импорт Excel", "В файле не найдено username.")
+            return
+        added, updated = self._upsert_leads(leads)
+        messagebox.showinfo(
+            "Импорт Excel",
+            f"Файл: {os.path.basename(path)}\n"
+            f"Найдено username: {len(leads)}\n"
+            f"Добавлено: {added}\n"
+            f"Обновлено: {updated}\n"
+            f"Всего в списке: {len(self.matched_users)}"
+        )
+
+    def _remove_imported_leads(self):
+        before = len(self.matched_users)
+        self.matched_users = [
+            u for u in self.matched_users
+            if u.get("source") not in {"manual", "import"}
+        ]
+        removed = before - len(self.matched_users)
+        self._update_count()
+        messagebox.showinfo("Очистка", f"Удалено импортированных/ручных: {removed}")
+
     def _lead_filter_text(self) -> str:
         return self.lead_filter_var.get().strip().lower() if hasattr(self, "lead_filter_var") else ""
 
@@ -814,6 +1086,7 @@ class App:
             user.get("chat", ""),
             user.get("message", ""),
             user.get("date", ""),
+            self._lead_source_label(user),
         ]).lower()
         return needle in haystack
 
@@ -830,9 +1103,16 @@ class App:
             msg = (user.get("message") or "")[:80]
             self.leads_tree.insert(
                 "", tk.END,
-                iid=str(user["id"]),
+                iid=self._lead_key(user),
                 text=mark,
-                values=(user["name"], uname, user.get("chat", ""), msg, user.get("date", "")),
+                values=(
+                    user["name"],
+                    uname,
+                    user.get("chat", ""),
+                    msg,
+                    user.get("date", ""),
+                    self._lead_source_label(user),
+                ),
             )
         self._update_mail_selection_count()
 
@@ -843,9 +1123,8 @@ class App:
         item = self.leads_tree.identify_row(event.y)
         if not item:
             return
-        uid = int(item)
         for user in self.matched_users:
-            if user["id"] == uid:
+            if self._lead_key(user) == item:
                 user["selected"] = not user.get("selected", True)
                 break
         self._refresh_leads_list()
@@ -909,23 +1188,39 @@ class App:
         self.send_btn.config(state=tk.DISABLED)
         self._run_async(self._async_mailing(msg, delay, recipients))
 
+    async def _resolve_recipient(self, user: dict):
+        if user.get("id"):
+            return user["id"]
+        username = _normalize_username(user.get("username", ""))
+        if not username:
+            raise ValueError("Нет username для отправки")
+        entity = await self.client.get_entity(username)
+        user["id"] = entity.id
+        user["_key"] = f"tg_{entity.id}"
+        if not user.get("name") or user["name"] == f"@{username}":
+            user["name"] = _entity_name(entity)
+        return entity
+
     async def _async_mailing(self, message: str, delay: float, recipients: list):
         import asyncio as aio
         total   = len(recipients)
         success = 0
         for i, user in enumerate(recipients, 1):
+            label = user.get("name") or (f"@{user.get('username')}" if user.get("username") else "?")
             try:
-                await self.client.send_message(user["id"], message)
-                log = f"[{i}/{total}] ✓  {user['name']}\n"
+                target = await self._resolve_recipient(user)
+                await self.client.send_message(target, message)
+                log = f"[{i}/{total}] ✓  {label}\n"
                 success += 1
             except Exception as ex:
-                log = f"[{i}/{total}] ✗  {user['name']}: {ex}\n"
+                log = f"[{i}/{total}] ✗  {label}: {ex}\n"
             self._ui(lambda l=log: self._add_mail_log(l))
             self._ui(lambda v=f"Прогресс: {i}/{total}": self.mail_progress_var.set(v))
             if i < total:
                 await aio.sleep(delay)
         summary = f"\n--- Рассылка завершена. Успешно: {success}/{total} ---\n"
         self._ui(lambda s=summary: self._add_mail_log(s))
+        self._ui(self._refresh_leads_list)
         self._ui(lambda: self.send_btn.config(state=tk.NORMAL))
 
     def _add_mail_log(self, text: str):
