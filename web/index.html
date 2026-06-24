@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Telegram Парсер</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Telegram Парсер</h1>
+      <p id="statusLine">Загрузка…</p>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="conn">Подключение</button>
+      <button class="tab" data-tab="mon">Мониторинг</button>
+      <button class="tab" data-tab="mail">Рассылка</button>
+      <button class="tab" data-tab="logs">Логи</button>
+    </nav>
+
+    <section id="tab-conn" class="panel active">
+      <div class="card">
+        <h2>Telegram API</h2>
+        <label>API ID<input id="apiId" type="text" inputmode="numeric" /></label>
+        <label>API Hash<input id="apiHash" type="text" /></label>
+        <label>Телефон<input id="phone" type="tel" placeholder="+7999…" /></label>
+        <div class="row">
+          <button id="saveConfig" class="btn">Сохранить API</button>
+          <button id="resetSession" class="btn warn">Сброс сессии</button>
+          <button id="resetAll" class="btn danger">Сброс API</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Подключение аккаунта</h2>
+        <p id="connInfo"></p>
+        <div class="row">
+          <button id="connectBtn" class="btn primary">Подключить</button>
+          <button id="disconnectBtn" class="btn">Отключить</button>
+        </div>
+        <div id="authBlock" class="hidden">
+          <label>Код<input id="authCode" type="text" /></label>
+          <label>2FA пароль<input id="auth2fa" type="password" /></label>
+          <div class="row">
+            <button id="submitCode" class="btn primary">Подтвердить код</button>
+            <button id="submit2fa" class="btn primary">Подтвердить 2FA</button>
+            <button id="resendCode" class="btn">Код снова</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-mon" class="panel">
+      <div class="card">
+        <h2>Ключевые слова</h2>
+        <label>Слова через запятую<input id="keywords" type="text" /></label>
+        <label class="check"><input id="scanHistory" type="checkbox" /> Искать в истории при старте</label>
+        <label>Лимит сообщений/чат (0 = все)<input id="historyLimit" type="number" min="0" /></label>
+        <div class="row">
+          <button id="saveMonSettings" class="btn">Сохранить</button>
+          <button id="startMon" class="btn primary">▶ Мониторинг</button>
+          <button id="scanHist" class="btn">🔍 История</button>
+          <button id="stopMon" class="btn warn">⏹ Стоп</button>
+        </div>
+        <p id="scanProgress"></p>
+      </div>
+    </section>
+
+    <section id="tab-mail" class="panel">
+      <div class="card">
+        <h2>Импорт / ручной ввод</h2>
+        <label>Username (по строке)<textarea id="manualUsers" rows="4"></textarea></label>
+        <div class="row">
+          <button id="addManual" class="btn">Добавить</button>
+          <label class="btn file-btn">Excel .xlsx<input id="xlsxFile" type="file" accept=".xlsx" hidden /></label>
+          <button id="removeImported" class="btn warn">Удалить импорт</button>
+          <button id="clearLeads" class="btn danger">Очистить все</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Лиды <span id="leadCount"></span></h2>
+        <div class="row">
+          <button id="selectAll" class="btn sm">Все</button>
+          <button id="selectNone" class="btn sm">Снять</button>
+        </div>
+        <div id="leadsList" class="leads"></div>
+      </div>
+      <div class="card">
+        <h2>Рассылка</h2>
+        <label>Текст<textarea id="mailMessage" rows="4"></textarea></label>
+        <label>Задержка (сек)<input id="mailDelay" type="number" min="0.5" step="0.5" /></label>
+        <button id="sendMail" class="btn primary full">Отправить выбранным</button>
+        <p id="mailProgress"></p>
+      </div>
+    </section>
+
+    <section id="tab-logs" class="panel">
+      <div class="card">
+        <h2>Результаты парсинга</h2>
+        <pre id="resultsLog"></pre>
+      </div>
+      <div class="card">
+        <h2>Лог рассылки</h2>
+        <pre id="mailLog"></pre>
+      </div>
+    </section>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
